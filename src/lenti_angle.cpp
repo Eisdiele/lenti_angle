@@ -1,0 +1,822 @@
+/**
+* @file lenti_angle.cpp
+* @author Fabian Eisele
+* @date Januar 2016
+* @version 0.1
+* @brief ROS version for finding the current angle with the help of lenticular lens displays (LLD). 
+*	For proper functionality the edited executable "single_board_lenti.cpp" 
+* 	has to be included in the ar_sys package.
+* @ source: https://github.com/Eisdiele/lenti_angle
+*/
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <aruco/aruco.h>
+#include <aruco/boarddetector.h>
+#include <aruco/cvdrawingutils.h>
+#include <std_msgs/Float32.h>
+
+#include <opencv2/core/core.hpp>
+#include <ros/ros.h>
+#include <image_transport/image_transport.h>
+#include <cv_bridge/cv_bridge.h>
+#include <sensor_msgs/image_encodings.h>
+#include <ar_sys/utils.h>
+
+#include <aruco/cvdrawingutils.h>
+#include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/calib3d/calib3d.hpp>
+
+using namespace aruco;
+using namespace cv;
+
+class LentiAngle
+{
+	private:
+		
+		cv::Mat inImage, inResultImg, resultImg, rvec, tvec;
+		aruco::CameraParameters camParam;
+		
+		bool useRectifiedImages;
+		bool draw_lenti_display;
+		bool cam_info_received;
+		bool nonlinear_angle_calculation;
+
+		image_transport::Publisher image_result_pub;
+		image_transport::Publisher debug_pub;
+		
+		image_transport::Subscriber tvec_sub;
+		image_transport::Subscriber rvec_sub;
+		
+		ros::Publisher y_angle_pub;
+		ros::Publisher x_angle_pub;
+		ros::Publisher z_angle_pub;
+
+		ros::Subscriber boardSize_sub;
+		ros::Subscriber cam_info_sub;
+
+		float boardSize;
+
+		double lenti_padding;
+		double lenti_width;
+		double lenti_length;
+		double marker_size;
+
+		ros::NodeHandle nh;
+		image_transport::ImageTransport it;
+		image_transport::Subscriber image_sub;
+		image_transport::Subscriber image_result_ar_sys_sub;
+		
+		//START TESTING AREA////////////////////////////
+		/*vector<Marker> tesma;
+		ros::Publisher test_pub;
+
+		ros::Publisher b1_pub;
+		ros::Publisher b2_pub;
+		ros::Publisher b3_pub;
+		ros::Publisher b4_pub;
+		ros::Publisher b5_pub;
+		ros::Publisher b6_pub;
+		ros::Publisher b7_pub;
+		ros::Publisher b8_pub;
+		ros::Publisher b9_pub;
+		ros::Publisher b10_pub;
+		ros::Publisher b11_pub;
+		ros::Publisher b12_pub;*/
+		//END TESTING AREA/////////////////////////////////////
+
+	public:
+		LentiAngle()
+			: cam_info_received(false),
+			nh("~"),
+			it(nh)
+		{
+			image_sub = it.subscribe("/image", 1, &LentiAngle::image_callback, this);
+			cam_info_sub = nh.subscribe("/camera_info", 1, &LentiAngle::cam_info_callback, this);
+			image_result_ar_sys_sub = it.subscribe("/result", 1, &LentiAngle::image_result_callback, this);
+			boardSize_sub = nh.subscribe("/boardSize", 1, &LentiAngle::boardSize_callback, this);
+			tvec_sub = it.subscribe("/tvec", 1, &LentiAngle::tvec_callback, this);
+			rvec_sub = it.subscribe("/rvec", 1, &LentiAngle::rvec_callback, this);
+
+			image_result_pub = it.advertise("result", 1);
+			y_angle_pub = nh.advertise<std_msgs::Float32>("y_angle", 100);
+			x_angle_pub = nh.advertise<std_msgs::Float32>("x_angle", 100);
+			z_angle_pub = nh.advertise<std_msgs::Float32>("z_angle", 100);
+
+			nh.param<double>("lenti_padding", lenti_padding, 1.0f);
+			nh.param<double>("lenti_width", lenti_width, 2.0f);
+			nh.param<double>("lenti_length", lenti_length, 18.0f);
+			nh.param<double>("marker_size", marker_size, 18.0f);
+			nh.param<bool>("image_is_rectified", useRectifiedImages, true);
+			nh.param<bool>("draw_lenti_display", draw_lenti_display, true);	
+			nh.param<bool>("nonlinear_angle_calculation", nonlinear_angle_calculation, false);		
+
+			//the_lenti_config.readFromFile(lenti_config.c_str());
+
+			ROS_INFO("Modified Lenti_Angle node started with size of lenticular display: %fx%f cm with a padding of %f cm",
+					 lenti_length, lenti_width, lenti_padding);
+
+			//START TESTING AREA///////////////////////////////////////////////
+			/*
+			test_pub = nh.advertise<std_msgs::Float32>("Testvalue", 100);
+			b1_pub = nh.advertise<std_msgs::Float32>("b1", 100);			
+			b2_pub = nh.advertise<std_msgs::Float32>("b2", 100);
+			b3_pub = nh.advertise<std_msgs::Float32>("b3", 100);
+			b4_pub = nh.advertise<std_msgs::Float32>("b4", 100);
+			b5_pub = nh.advertise<std_msgs::Float32>("b5", 100);
+			b6_pub = nh.advertise<std_msgs::Float32>("b6", 100);
+			b7_pub = nh.advertise<std_msgs::Float32>("b7", 100);
+			b8_pub = nh.advertise<std_msgs::Float32>("b8", 100);
+			b9_pub = nh.advertise<std_msgs::Float32>("b9", 100);
+			b10_pub = nh.advertise<std_msgs::Float32>("b10", 100);
+			b11_pub = nh.advertise<std_msgs::Float32>("b11", 100);
+			b12_pub = nh.advertise<std_msgs::Float32>("b12", 100);
+			*/			
+			//END TESTING AREA///////////////////////////////////////////////
+		}
+
+		float linAngleCalc(float LentiPos)
+		{	//calculates angle according to the beneath straight line definition
+			
+			float angleDeg;
+			angleDeg=64.55502*LentiPos+90; //{57,72249...122,27751}
+			return angleDeg;
+		}
+		
+		float nonlinAngleCalc(float lentiPos)
+		{	//calculates angle according to the beneath fixpoints
+			
+			//Degree
+			float hardPointsDeg[] = {65.81244f, 67.61249f, 74.51692f, 84.48396f, 95.47181, 105.43870, 112.34283, 114.14241};
+			//Corresponding tangential position			
+			float hardPointsPos[] = {-0.5f, -0.35714f, -0.21429f, -0.07143f, 0.07143f, 0.21429f, 0.35714f, 0.5f};
+			//return linearize (hardPointsDeg, hardPointsPos, lentiPos);
+			float angleDeg;			
+			unsigned int a=0;
+			unsigned int b=0;
+				
+			for (unsigned int i=0; hardPointsPos[i]<lentiPos; i++)
+			{	
+				a=i;			
+			}
+			b=a+1;
+			
+			angleDeg=hardPointsDeg[a]+((hardPointsDeg[b]-hardPointsDeg[a])/(hardPointsPos[b]-hardPointsPos[a]))*(lentiPos-hardPointsPos[a]);
+			return angleDeg;
+		}
+
+		void drawAxisLenti(const float xAngle, const float yAngle, const float zAngle, cv::Mat& Image, const cv::Mat& tvec, const cv::Mat& rvec, const CameraParameters &CP)
+		{
+			float length=600.0f; //length of normal vector
+			cv::Point3f zAxisCoor[2];
+			//cv::Point2f zAxisProj[2][1];
+			vector<cv::Point2f> zAxisProj;
+				zAxisProj.reserve(2);			
+			cv::Point2f endZProj;
+			
+			//the origin and the end point of normal vector in nontransformed system
+			zAxisCoor[0] = cv::Point3f(0.0f, 0.0f, 0.0f);
+			zAxisCoor[1] = cv::Point3f(0.0f, 0.0f, length);
+			
+			cv::Mat objectPoints (2,3,CV_32FC1);
+					
+				for(unsigned char j = 0; j < 2; j++)
+				{
+					objectPoints.at<float>(j,0) = -zAxisCoor[j].y;
+					objectPoints.at<float>(j,1) = zAxisCoor[j].x;
+					objectPoints.at<float>(j,2) = zAxisCoor[j].z;	
+				}			
+			//only for finding origin (0|0) and do further comparism the points will be projected
+			cv::projectPoints( objectPoints, rvec, tvec, CP.CameraMatrix, CP.Distorsion, zAxisProj);
+			
+			float xAngleRad=xAngle*(3.141592654/180);
+			float yAngleRad=yAngle*(3.141592654/180);
+			float zAngleRad=zAngle*(3.141592654/180);
+			float xFac=(cos(xAngleRad)*cos(zAngleRad)+cos(yAngleRad)*sin(zAngleRad));
+			float yFac=(cos(yAngleRad)*cos(zAngleRad)+cos(xAngleRad)*sin(zAngleRad));
+			
+			endZProj.x=zAxisProj[0].x-length*xFac;
+			endZProj.y=zAxisProj[0].y+length*yFac;
+			
+			cv::Scalar color=cv::Scalar(0x80, 0x0, 0x80);
+			cv::line(Image, zAxisProj[0], endZProj, color, 2, CV_AA);
+			
+		}
+
+		void drawCross(cv::Mat &Image, const cv::Point2f& position, const Scalar& color, float size)
+		{
+			//simply draws an x on a certain position in the image 
+			cv::Point2f points[4];
+			points[0].x = position.x - size/2.0f;
+			points[0].y = position.y - size/2.0f;
+												
+			points[1].x = position.x + size/2.0f;
+			points[1].y = position.y + size/2.0f;
+			points[2].x = position.x - size/2.0f;
+			points[2].y = position.y + size/2.0f;
+			points[3].x = position.x + size/2.0f;
+			points[3].y = position.y - size/2.0f;
+											
+			cv::line(Image, points[0], points[1], color, 2, CV_AA); //Line Type: CV_AA = antialiased line
+			cv::line(Image, points[2], points[3], color, 2, CV_AA);
+		}
+
+		float searchMinLineRefine(const cv::Mat &rawImage, cv::Mat &resImage, const std::vector<cv::Point2f>& points, 
+						const unsigned short numberOfStepsTangential, const unsigned short numberOfStepsOrthogonal, 
+						const unsigned short order, float& tPosition)
+		{
+			//calculate start point for searching the lens. This point is on edge between corners 0, 1
+			cv::Point2f start;
+			start.x = (points[0].x + points[1].x) / 2.0f; //01 represents first short side of the display 
+			start.y = (points[0].y + points[1].y) / 2.0f;
+			
+			//calculate end point for searching the lens. This point is on edge between corners 2, 3
+			cv::Point2f end;
+			end.x = (points[2].x + points[3].x) / 2.0f; //23 represents second short side of the display
+			end.y = (points[2].y + points[3].y) / 2.0f;
+			
+			//what are the ranges the search takes place in?
+			float dx = end.x - start.x; //dx, dy is distance from end to start
+			float dy = end.y - start.y;
+			float minValue = 255.0f;
+	
+			cv::Point2f begin;
+			begin.x = start.x + dx / ((float) 2 * numberOfStepsTangential);
+			begin.y = start.y + dy / ((float) 2 * numberOfStepsTangential);
+			
+			cv::Point2f currentPoint;
+			currentPoint.x = begin.x;
+			currentPoint.y = begin.y;			
+			
+			cv::Point2f minPoint;
+			minPoint.x = begin.x;
+			minPoint.y = begin.y;
+			
+			//smallest distance in orthogonal direction (lens related) in x and y
+			float dxOrtho = points[0].x - points[1].x; 
+			float dyOrtho = points[0].y - points[1].y;	
+
+			if(abs(points[3].x - points[2].x) < abs(dxOrtho))
+				dxOrtho	= points[3].x - points[2].x;
+
+			if(abs(points[3].y - points[2].y) < abs(dyOrtho))
+				dyOrtho	= points[3].y - points[2].y;
+
+			float valueSum = 0; //valueSum calculates the average brightness of display
+			
+			//set position crosswise where to start the search in orthogonal direction
+			float orthoOffsetX = 0;
+			float orthoOffsetY = 0;
+		
+			orthoOffsetX = -dxOrtho / 2.0f * ((float)(numberOfStepsOrthogonal)) / ((float)((numberOfStepsOrthogonal) + 2));
+			orthoOffsetY = -dyOrtho / 2.0f * ((float)(numberOfStepsOrthogonal)) / ((float)((numberOfStepsOrthogonal) + 2));
+			
+				
+			float imageData[numberOfStepsTangential][4]; 
+
+			for(unsigned short i = 0; i <= order; i++)
+			{
+				if(i > 0)
+				{
+					//the area that is searched through is decreased to 2.3 of the distance between seaching points before.
+					dx = dx * 2.3 / ((float) numberOfStepsTangential); 
+					dy = dy * 2.3 / ((float) numberOfStepsTangential);				
+
+					if(dx * dx + dy * dy < 1.0f)
+					{
+						i = order;
+						break;
+					}
+					
+					//setting the start of search
+					begin.x = minPoint.x - (dx * (numberOfStepsTangential-1) / ((float) numberOfStepsTangential)) / 2.0f;
+					begin.y = minPoint.y - (dy * (numberOfStepsTangential-1) / ((float) numberOfStepsTangential)) / 2.0f;
+					
+					//beware of the two ends of LLD!
+					//end: at end
+					while(	(abs(end.x - begin.x) > abs(end.x - start.x)) ||
+							(abs(end.y - begin.y) > abs(end.y - start.y))) 
+					{
+						begin.x += dx / (float) numberOfStepsTangential;
+						begin.y += dy / (float) numberOfStepsTangential; 
+					}
+					//end: at start
+					while(	(abs(begin.x + dx - start.x) > abs(end.x - start.x)) ||
+							(abs(begin.y + dy - start.y) > abs(end.y - start.y)))
+					{
+						begin.x -= dx / (float) numberOfStepsTangential;
+						begin.y -= dy / (float) numberOfStepsTangential; 
+					}
+				}
+
+				//tangential searching through LLD
+				for(unsigned short j = 0; j < numberOfStepsTangential; j++)
+				{
+					float fTangential = j / ((float) numberOfStepsTangential); //actual position (normed)
+			
+					float mean = 0;
+
+					//orthogonal searching through LLD
+					for(unsigned short k = 0; k <= numberOfStepsOrthogonal; k++)
+					{
+						float fOrthogonal = (k) / ((float)(numberOfStepsOrthogonal + 2));	
+
+						float currentX = begin.x + orthoOffsetX + dx * fTangential + dxOrtho * fOrthogonal;
+						float currentY = begin.y + orthoOffsetY + dy * fTangential + dyOrtho * fOrthogonal;
+				
+						cv::Point roundedPoint;
+						roundedPoint.x = (int)currentX;
+						roundedPoint.y = (int)currentY;
+						
+						//COMMENTED CODE: Visualize fixpoints of search for minimum in LLD////////////
+						/*if (i==0){ 
+							cv::Scalar color = cv::Scalar(0x0, 0x0, 0xff);
+							float size=7.0f;
+							drawCross(resImage, roundedPoint, color, 2.0f);
+						}
+						if (i==1){ 
+							cv::Scalar color = cv::Scalar(0xff, 0x00, 0x00);
+							float size=5.0f;
+							drawCross(resImage, roundedPoint, color, 1.3f);
+						}*/////////////////////////////////////////////////////////////////////////////
+						
+
+						cv::Vec3b bgrPixel = rawImage.at<cv::Vec3b>(roundedPoint);
+						//Caculate average of orthogonal line of pixels 
+						mean += (bgrPixel[0] + bgrPixel[1] + bgrPixel[2]) / (3.0f * (numberOfStepsOrthogonal + 1));
+					}
+			
+					if(i == 0)
+						valueSum += mean;
+					
+					//Fill the array up with data 0: relative position, 1: brightness, 2: position x, 3: position y	
+					currentPoint.x = begin.x + dx * fTangential;
+					currentPoint.y = begin.y + dy * fTangential;
+					imageData[j][0] = sqrt((currentPoint.x - start.x) * (currentPoint.x - start.x) + 
+								(currentPoint.y - start.y) * (currentPoint.y - start.y) ) /
+								sqrt((end.x - start.x) * (end.x - start.x) + 
+								(end.y - start.y) * (end.y - start.y) );
+					
+					imageData[j][1] = mean;
+					imageData[j][2] = currentPoint.x;
+					imageData[j][3] = currentPoint.y;
+					
+					//set coordinats for new brightness minimum
+					if(mean < minValue)
+					{
+						minPoint.x = begin.x + dx * fTangential;
+						minPoint.y = begin.y + dy * fTangential;
+						minValue = mean;
+					}
+				}
+
+				if(i == 0)
+					valueSum -= minValue;
+			}
+			
+			//search array for min and max value
+			float maxY=0.0f;
+			float minY=255.0f;
+
+			for (int i=0; i<numberOfStepsTangential; i++)
+			{	
+				if (imageData[i][1]>maxY) maxY=imageData[i][1];
+				if (imageData[i][1]<minY) minY=imageData[i][1];
+			}
+			
+			//calculate the weighted sum to obtain the middle of the dark area
+			float posMid=0.0f;
+			float div=0.0f;
+
+			for (int i=0; i<numberOfStepsTangential; i++)
+			{
+				if (((imageData[i][1]-minY)/(maxY-minY))<(0.05f))
+				{
+					div=div+14.0f;
+					posMid=posMid+imageData[i][0]*14.0f;
+				}
+				else
+				{
+					if (((imageData[i][1]-minY)/(maxY-minY))<(0.10f))
+					{
+						div=div+12.0f;
+						posMid=posMid+imageData[i][0]*12.0f;
+					}
+					else
+					{
+						if (((imageData[i][1]-minY)/(maxY-minY))<(0.17f))
+						{	
+							div=div+8.0f;
+							posMid=posMid+imageData[i][0]*8.0f;
+						}
+						else
+						{
+							if (((imageData[i][1]-minY)/(maxY-minY))<(0.35f))
+							{
+								div=div+2.0f;
+								posMid=posMid+imageData[i][0]*2.0f;
+							}
+							
+						}
+					}
+				}
+			}
+			
+			//calculate the Position of middle if div=0 just give back the minimum point found.
+			if (div!=0) posMid=(posMid/div);
+			else{
+				posMid = 	sqrt((minPoint.x - start.x) * (minPoint.x - start.x) + 
+						(minPoint.y - start.y) * (minPoint.y - start.y) ) /
+						sqrt((end.x - start.x) * (end.x - start.x) + 
+						(end.y - start.y) * (end.y - start.y) )	- 0.5f;
+			}
+			
+				///COMMENTED CODE: For analyzing the brightness data in the array from ROS Terminal///////////////////////
+				///keep in mind to start the publishing testpart as well!
+				/*
+				std_msgs::Float32 b1Msg;
+				b1Msg.data=imageData[0][1];
+				b1_pub.publish(b1Msg);
+			
+				std_msgs::Float32 b2Msg;
+				b2Msg.data=imageData[1][1];
+				b2_pub.publish(b2Msg);
+	
+				std_msgs::Float32 b3Msg;
+				b3Msg.data=imageData[2][1];
+				b3_pub.publish(b3Msg);
+	
+				std_msgs::Float32 b4Msg;
+				b4Msg.data=imageData[3][1];
+				b4_pub.publish(b4Msg);
+
+				std_msgs::Float32 b5Msg;
+				b5Msg.data=imageData[4][1];
+				b5_pub.publish(b5Msg);
+
+				std_msgs::Float32 b6Msg;
+				b6Msg.data=imageData[5][1];
+				b6_pub.publish(b6Msg);
+
+				std_msgs::Float32 b7Msg;
+				b7Msg.data=imageData[6][1];
+				b7_pub.publish(b1Msg);
+
+				std_msgs::Float32 b8Msg;
+				b8Msg.data=imageData[7][1];
+				b8_pub.publish(b8Msg);
+
+				std_msgs::Float32 b9Msg;
+				b9Msg.data=imageData[8][1];
+				b9_pub.publish(b9Msg);
+
+				std_msgs::Float32 b10Msg;
+				b10Msg.data=imageData[9][1];
+				b10_pub.publish(b10Msg);
+
+				std_msgs::Float32 b11Msg;
+				b11Msg.data=imageData[10][1];
+				b11_pub.publish(b11Msg);
+	
+				std_msgs::Float32 b12Msg;
+				b12Msg.data=imageData[11][1];
+				b12_pub.publish(b12Msg);
+				*///////////////////////////////////////////////////////////////////////////////////////////		
+			
+			//x y position of minimum.
+			minPoint.x = start.x+(end.x-start.x)*(posMid);
+			minPoint.y = start.y+(end.y-start.y)*(posMid); 
+			// average brightness of the display without the darkest spot. But only after first run.
+			float average = (valueSum / (numberOfStepsTangential - 1));
+			
+			tPosition=posMid-0.5;
+			return tPosition;
+			
+		}
+		
+		float detectAngle(const cv::Mat &rawImage, cv::Mat &resImage, const vector<cv::Point2f>& imageLensCoordinates, float tPosition)
+		{		
+			tPosition = searchMinLineRefine(rawImage, resImage, imageLensCoordinates, 12, 2, 1, tPosition);
+			cv::Point2f minPoint;
+			minPoint.x = (imageLensCoordinates[0].x + imageLensCoordinates[1].x) / 2.0f + 
+				(	(imageLensCoordinates[2].x + imageLensCoordinates[3].x) / 2.0f - 
+					(imageLensCoordinates[0].x + imageLensCoordinates[1].x) / 2.0f ) * (0.5f + tPosition);
+			minPoint.y = (imageLensCoordinates[0].y + imageLensCoordinates[1].y) / 2.0f + 
+				(	(imageLensCoordinates[2].y + imageLensCoordinates[3].y) / 2.0f - 
+					(imageLensCoordinates[0].y + imageLensCoordinates[1].y) / 2.0f ) * (0.5f + tPosition);		
+			//Draw a Cross on the found minimum
+			drawCross(resImage, minPoint, Scalar(0xff, 0x0, 0x90), 7.0f);
+							
+			return tPosition;
+		}
+		
+		float findDeltaAngleZ( const cv::Mat &rvec, const cv::Mat &tvec, const CameraParameters &CP)
+		{	
+			//Finds the turning of the coordinatesystem around the z axis. 
+			//does not work properly...
+			//project the testingpoint
+			cv::Point3f testingpoint = cv::Point3f(0, 1, 0);
+			cv::Mat testingpointMat (1,3,CV_32FC1); //Mat [1x3 CV_32FC1] contains the real coordinats of the Testingpoint
+			testingpointMat.at<float>(0,0) = testingpoint.x; //-y
+			testingpointMat.at<float>(0,1) = testingpoint.y; //x
+			testingpointMat.at<float>(0,2) = testingpoint.z; //z		
+			vector<cv::Point2f> testingpointProj;
+			testingpointProj.reserve(1);
+			cv::projectPoints( testingpointMat, rvec, tvec, CP.CameraMatrix, CP.Distorsion, testingpointProj);
+			
+			//Calculate the Tangens out of testing points projection
+			float dAngleZ=0;
+			if (abs(testingpointProj[0].x)>0.00000000001) 
+			{
+				dAngleZ=atan(testingpointProj[0].y/testingpointProj[0].x); //Winkel
+				dAngleZ=dAngleZ*(180/3.141592654); //PI				
+				if (testingpointProj[0].x<0)
+				{
+					dAngleZ=dAngleZ+180;
+				}			
+			}			
+			else
+			{	
+				if(testingpointProj[0].y>0) dAngleZ=90;
+				else dAngleZ=270;
+			}
+			
+			//Correction, do research!?			
+			dAngleZ=dAngleZ-10;
+
+			if (dAngleZ<0) dAngleZ=dAngleZ+360;
+						
+			return dAngleZ;
+		}
+		
+		void validateLenses(const cv::Mat &rawImage, cv::Mat &resImage, const cv::Mat &rvec, const cv::Mat &tvec, const CameraParameters &CP)
+		{		
+
+			cv::Point3f lensCoordinates[4][4]; //contains the coordinats of lenti_display corners in normed format
+			
+			const float lensPadding = lenti_padding / marker_size;
+			const float lensWidth = lenti_width / marker_size;
+			const float lensDepth = 0.0f;
+			float tPositionY;
+			float tPositionX;
+			float tPosition; //tPosition is the normed tangential position of black dot in the display related to the middle of the
+						//display.
+						
+			
+			//left				
+			lensCoordinates[0][0] = cv::Point3f(-0.5f-lensPadding-lensWidth, -0.5f, lensDepth);
+			lensCoordinates[0][1] = cv::Point3f(-0.5f-lensPadding, -0.5f, lensDepth);
+			lensCoordinates[0][2] = cv::Point3f(-0.5f-lensPadding, 0.5f, lensDepth);
+			lensCoordinates[0][3] = cv::Point3f(-0.5f-lensPadding-lensWidth, 0.5f, lensDepth);
+			//right
+			lensCoordinates[1][0] = cv::Point3f(0.5f+lensPadding, -0.5f, lensDepth);
+			lensCoordinates[1][1] = cv::Point3f(0.5f+lensPadding+lensWidth, -0.5f, lensDepth);
+			lensCoordinates[1][2] = cv::Point3f(0.5f+lensPadding+lensWidth, 0.5f, lensDepth);
+			lensCoordinates[1][3] = cv::Point3f(0.5f+lensPadding, 0.5f, lensDepth);
+			//up	
+			lensCoordinates[2][0] = cv::Point3f(-0.5f, 0.5f+lensPadding, lensDepth);
+			lensCoordinates[2][1] = cv::Point3f(-0.5f, 0.5f+lensPadding+lensWidth, lensDepth);
+			lensCoordinates[2][2] = cv::Point3f(0.5f, 0.5f+lensPadding+lensWidth, lensDepth);
+			lensCoordinates[2][3] = cv::Point3f(0.5f, 0.5f+lensPadding, lensDepth);			
+			//down
+			lensCoordinates[3][0] = cv::Point3f(-0.5f, -0.5f-lensPadding-lensWidth, lensDepth);
+			lensCoordinates[3][1] = cv::Point3f(-0.5f, -0.5f-lensPadding, lensDepth);
+			lensCoordinates[3][2] = cv::Point3f(0.5f, -0.5f-lensPadding, lensDepth);
+			lensCoordinates[3][3] = cv::Point3f(0.5f, -0.5f-lensPadding-lensWidth, lensDepth);			
+
+			//originally designed for each lens having a different color...
+			cv::Scalar colors[4];
+			
+			for(unsigned short j = 0; j < 4; j++)
+			{
+				colors[j] = cv::Scalar(0x80, 0x0, 0x80);		
+			}			
+			/*
+			colors[0] = cv::Scalar(0, 230, 230, 255); 			
+			colors[1] = cv::Scalar(230, 230, 0, 255); 
+			colors[2] = cv::Scalar(230, 0, 230, 255); 
+			colors[3] = cv::Scalar(240, 140, 140, 255); 
+			*/
+
+			float boardSizeFactor = boardSize; //size of the board
+			
+			for(unsigned char i = 0; i < 4; i++)	
+			{	
+				cv::Mat objectPoints (4,3,CV_32FC1); //Mat [4x3 CV_32FC1] will contain the image coordinats of the Lenti_Display edges
+					
+				for(unsigned char j = 0; j < 4; j++)
+				{
+					objectPoints.at<float>(j,0) = -lensCoordinates[i][j].y * boardSizeFactor;
+					objectPoints.at<float>(j,1) = lensCoordinates[i][j].x * boardSizeFactor;
+					objectPoints.at<float>(j,2) = lensCoordinates[i][j].z * boardSizeFactor;	
+				}
+				
+				vector<cv::Point2f> imageLensCoordinates;
+				imageLensCoordinates.reserve(4);
+				
+				//project the corners into the image
+				cv::projectPoints( objectPoints, rvec, tvec, CP.CameraMatrix, CP.Distorsion, imageLensCoordinates);
+				
+				//find the position of the dark spot (tangential Position)
+				tPosition=detectAngle(rawImage, resImage, imageLensCoordinates, tPosition);				
+				
+				//calculate average of tangential Position.				
+				if (i<2)
+				{
+					tPositionY+=(tPosition / 2.0f);
+				}
+				else
+				{
+					tPositionX+=(tPosition / 2.0f);
+				}
+
+				//draw margin of LLD 
+				for(unsigned char j = 0; j < 4; j++)
+					cv::line(resImage,imageLensCoordinates[j],imageLensCoordinates[(j+1)%4], colors[i], 2, CV_AA);
+
+
+			}
+			
+			float angleY; //angle between y-axis and an imaginary vector (from 0 to the middle of the camera) [degree]
+			float angleX; //angle between x-axis and an imaginary vector (from 0 to the middle of the camera) [degree]
+			//tPosition is the other way around compared to the measured angle that is why -1.
+			if (nonlinear_angle_calculation)
+			{	
+				angleY=nonlinAngleCalc(-tPositionY);
+				angleX=nonlinAngleCalc(-tPositionX);
+			}
+			else
+			{
+				angleY=linAngleCalc(-tPositionY);
+				angleX=linAngleCalc(-tPositionX);
+			}
+			
+			//find angle the coordinate system is turned around z-Axis
+			float dAngleZ=findDeltaAngleZ(rvec, tvec, CP);
+			
+			//draw coordinatsystem based on lenti_angle information
+			drawAxisLenti(angleX, angleY, dAngleZ, resImage, tvec, rvec, CP);
+			
+			//publish it:
+			std_msgs::Float32 zAngleMsg;
+			zAngleMsg.data=dAngleZ;
+			z_angle_pub.publish(zAngleMsg);
+
+			std_msgs::Float32 yAngleMsg;
+			yAngleMsg.data=angleY;
+			y_angle_pub.publish(yAngleMsg);
+			tPositionY=0;		
+			
+			std_msgs::Float32 xAngleMsg;
+			xAngleMsg.data=angleX;
+			x_angle_pub.publish(xAngleMsg);	
+			tPositionX=0;	
+		}
+
+		// taken from the aruco files... for having the camera parameters...
+		aruco::CameraParameters getCamParams(const sensor_msgs::CameraInfo& cam_info,
+			bool useRectifiedParameters)
+		{	
+			cv::Mat cameraMatrix(3, 3, CV_32FC1);
+			cv::Mat distorsionCoeff(4, 1, CV_32FC1);
+			cv::Size size(cam_info.height, cam_info.width);
+
+			if ( useRectifiedParameters )
+			{
+				cameraMatrix.setTo(0);
+				cameraMatrix.at<float>(0,0) = cam_info.P[0]; cameraMatrix.at<float>(0,1) = cam_info.P[1]; cameraMatrix.at<float>(0,2) = cam_info.P[2];
+				cameraMatrix.at<float>(1,0) = cam_info.P[4]; cameraMatrix.at<float>(1,1) = cam_info.P[5]; cameraMatrix.at<float>(1,2) = cam_info.P[6];
+				cameraMatrix.at<float>(2,0) = cam_info.P[8]; cameraMatrix.at<float>(2,1) = cam_info.P[9]; cameraMatrix.at<float>(2,2) = cam_info.P[10];
+
+				for(int i=0; i<4; ++i)
+					distorsionCoeff.at<float>(i, 0) = 0;
+			}
+			else
+			{
+				for(int i=0; i<9; ++i)
+					cameraMatrix.at<float>(i%3, i-(i%3)*3) = cam_info.K[i];
+
+				for(int i=0; i<4; ++i)
+					distorsionCoeff.at<float>(i, 0) = cam_info.D[i];
+			}
+	
+			return aruco::CameraParameters(cameraMatrix, distorsionCoeff, size);
+		}
+		
+///CALLBACKS/////////////////////////////////////////////////////////////////////////////////////////////////////
+		//The following voids come from subscribed topics:
+
+		void image_callback(const sensor_msgs::ImageConstPtr& msg)
+		{	
+			if(!cam_info_received) return;
+
+			cv_bridge::CvImagePtr cv_ptr;
+			try
+			{
+				cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::RGB8);
+				inImage = cv_ptr->image;
+			}
+			catch (cv_bridge::Exception& e)
+			{
+				ROS_ERROR("cv_bridge exception: %s", e.what());
+				return;
+			}
+		}
+
+		void image_result_callback(const sensor_msgs::ImageConstPtr& msg)
+		{	
+			cv_bridge::CvImagePtr cv_ptr;
+			try
+			{
+				cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::RGB8);
+				inResultImg = cv_ptr->image;
+				resultImg = cv_ptr->image.clone();
+
+				if(!rvec.empty() && !tvec.empty() && cam_info_received)  validateLenses(inImage, resultImg, rvec, tvec, camParam);
+
+				if(image_result_pub.getNumSubscribers() > 0)
+				{
+					//show ar_sys/result with augmented lenticular information
+					cv_bridge::CvImage out_msg;
+					out_msg.header.frame_id = msg->header.frame_id;
+					out_msg.header.stamp = msg->header.stamp;
+					out_msg.encoding = sensor_msgs::image_encodings::RGB8;
+					out_msg.image = resultImg;
+					image_result_pub.publish(out_msg.toImageMsg());
+				}
+			}
+			catch (cv_bridge::Exception& e)
+			{
+				ROS_ERROR("cv_bridge exception: %s", e.what());
+				return;
+			}
+			
+			if(image_result_pub.getNumSubscribers() > 0)
+				{
+					//show ar_sys/result with augmented lenticular information
+					cv_bridge::CvImage out_msg;
+					out_msg.header.frame_id = msg->header.frame_id;
+					out_msg.header.stamp = msg->header.stamp;
+					out_msg.encoding = sensor_msgs::image_encodings::RGB8;
+					out_msg.image = resultImg;
+					image_result_pub.publish(out_msg.toImageMsg());
+				}
+		}
+
+		void rvec_callback(const sensor_msgs::ImageConstPtr& msg)
+		{	
+			cv_bridge::CvImagePtr cv_ptr;
+			try
+			{
+				cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::TYPE_32FC1);
+				rvec = cv_ptr->image;			
+			}
+			catch (cv_bridge::Exception& e)
+			{
+				ROS_ERROR("cv_bridge exception: %s", e.what());
+				return;
+			}
+		}
+
+		void tvec_callback(const sensor_msgs::ImageConstPtr& msg)
+		{	
+			cv_bridge::CvImagePtr cv_ptr;
+			try
+			{
+				cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::TYPE_32FC1);
+				tvec = cv_ptr->image;
+			}
+			catch (cv_bridge::Exception& e)
+			{
+				ROS_ERROR("cv_bridge exception: %s", e.what());
+				return;
+			}
+		}
+
+
+		void cam_info_callback(const sensor_msgs::CameraInfo &msg)
+		{	
+			camParam = getCamParams(msg, useRectifiedImages);
+			cam_info_received = true;
+			cam_info_sub.shutdown();
+		}
+		
+		void boardSize_callback(const std_msgs::Float32 &boardSizeMsg)
+		{
+			boardSize = boardSizeMsg.data;
+		}
+
+};
+
+//MAIN////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+int main(int argc,char **argv)
+{
+	ros::init(argc, argv, "lenti_angle");
+
+	LentiAngle node;
+
+	ros::spin();
+}
+			
