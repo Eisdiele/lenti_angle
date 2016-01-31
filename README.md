@@ -10,28 +10,28 @@ ROS package for reading of Lenticular Lens Displays from Fiducial Marker for ang
 ###Setting up a workspace for fiducial marker system with lenti_angle:
 
 ###set up ROS workspace
-$ source /opt/ros/indigo/setup.bash
-$ mkdir -p {workspace}/src
-$ cd {workspace}/src
-$ catkin_init_workspace
-$ cd {workspace}/
-$ catkin_make
+1. $ source /opt/ros/indigo/setup.bash
+2. $ mkdir -p {workspace}/src
+3. $ cd {workspace}/src
+4. $ catkin_init_workspace
+5. $ cd {workspace}/
+6. $ catkin_make
 
 ###clone lenti_angle repository to workspace: 
-$ cd {workspace}/src/
-$ git clone https://github.com/eisdiele/lenti_angle.git
+1. $ cd {workspace}/src/
+2. $ git clone https://github.com/eisdiele/lenti_angle.git
 
 ###clone ar_sys to {workspace}/src/
-$ git clone https://github.com/Sahloul/ar_sys.git
+1. $ git clone https://github.com/Sahloul/ar_sys.git
 
 ###clone usb_cam to {workspace}/src/
-$ git clone https://github.com/bosch-ros-pkg/usb_cam.git
+1. $ git clone https://github.com/bosch-ros-pkg/usb_cam.git
 
 ###Copy single_board_lenti.cpp from lenti_angle/data/ to ar_sys/src/
-$ cp {workspace}/src/lenti_angle/data/single_board_lenti.cpp {workspace}/src/ar_sys/src/single_board_lenti.cpp
+1. $ cp {workspace}/src/lenti_angle/data/single_board_lenti.cpp {workspace}/src/ar_sys/src/single_board_lenti.cpp
 
 ###Copy board_lenti.yml from lenti_angle/data to ar_sys/data/single:
-$ cp {workspace}/src/lenti_angle/data/board_lenti.yml {workspace}/src/ar_sys/data/single/board_lenti.yml
+1. $ cp {workspace}/src/lenti_angle/data/board_lenti.yml {workspace}/src/ar_sys/data/single/board_lenti.yml
 
 
 ###Then add the following lines to {workspace}/src/ar_sys/CMakeLists:
@@ -43,7 +43,7 @@ target_link_libraries(single_board_lenti aruco ${catkin_LIBRARIES})
 
 
 ###Start the ROS-Package:
-$ cd {workspace}/
-$ catkin_make
-$ source {workspace}/devel/setup.bash
-$ roslaunch lenti_angle lenti_angle.launch
+1. $ cd {workspace}/
+2. $ catkin_make
+3. $ source {workspace}/devel/setup.bash
+4. $ roslaunch lenti_angle lenti_angle.launch
